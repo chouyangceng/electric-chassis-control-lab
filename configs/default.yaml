@@ -1,0 +1,15 @@
+vehicle:
+  mass: 1600.0
+  yaw_inertia: 2800.0
+  wheel_radius: 0.32
+  max_torque: 2500.0
+control:
+  yaw_gain: 1000.0
+  sideslip_gain: 350.0
+  max_moment: 2500.0
+braking:
+  abs_target_slip: 0.15
+  max_regen_force: 4000.0
+benchmark:
+  steps: 400
+  seed: 7

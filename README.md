@@ -34,3 +34,9 @@ CARLA/ROS 2 适配器可用于验证高层转向、油门和制动接口；四�
 ## License
 
 Apache-2.0
+
+## 高级控制基准
+
+    python examples/advanced_benchmark.py
+
+高级示例会统一比较无控制、DYC、LQR 和 NMPC，并额外计算 ABS/再生制动协调和不同附着系数下的稳定性边界。新增模块包括 `controllers/esc.py`、`controllers/abs.py`、`allocation/constrained.py`、`allocation/energy.py`、`simulation/envelope.py` 和 `metrics/benchmark.py`。
