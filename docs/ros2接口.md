@@ -1,34 +1,67 @@
-# ROS 2 接口
+# ROS 2 接口说明
 
-项目的 ROS 2 适配器位于 `ros2/electric_chassis_control_ros`，不会把 `rclpy`
-加入核心 Python 依赖。这样可以在普通 Python/CI 环境运行全部动力学和控制算法，
-在 ROS 2 Jazzy/Humble 工作区中再构建节点。
+ROS 2 适配包位于 `ros2/electric_chassis_control_ros`。核心动力学、控制器和分配器不依赖
+`rclpy`，因此普通 Python 环境仍可运行算法、实验与单元测试；只有部署节点时才需要 ROS 2。
 
-## 消息约定
+## 控制输入
 
-节点订阅 `~/command`（`geometry_msgs/msg/Twist`）：
+节点不再使用 `geometry_msgs/msg/Twist` 冒充车辆控制命令。控制输入拆分为三个语义明确的
+标准消息：
 
-| 字段 | 含义 | 单位 |
+| 主题 | 消息类型 | 字段及单位 |
 | --- | --- | --- |
-| `linear.x` | 前轮转角 | rad |
-| `linear.y` | 纵向合力请求 | N |
-| `linear.z` | 四轮统一制动压力 | 0–1 |
-| `angular.z` | 横摆力矩请求 | N·m |
+| `~/force_request` | `geometry_msgs/msg/Wrench` | `force.x`：纵向合力 N；`torque.z`：横摆力矩 N·m |
+| `~/steering_angle` | `std_msgs/msg/Float64` | 前轮转角 rad |
+| `~/brake_request` | `std_msgs/msg/Float64` | 归一化制动压力 0～1 |
 
-节点发布 `~/wheel_torques` 和 `~/brake_pressures`（`std_msgs/msg/Float64MultiArray`），
-数组顺序为前左、前右、后左、后右；同时发布 `/diagnostics`
-（`diagnostic_msgs/msg/DiagnosticArray`）。所有输出在发布前都会再次执行扭矩和制动限幅。
+只有三类输入均已收到且时间差不超过 `command_timeout_s` 时，节点才接受新命令。节点输出：
 
-`Ros2CommandBridge.state_to_odometry()` 和 `odometry_to_state()` 提供
-`nav_msgs/msg/Odometry` 状态接口：纵向/侧向速度、横摆角速度使用标准 twist 字段，侧偏角放在
-`angular.x`，四个轮速写入 twist 协方差数组的前四项（这是无自定义消息时的明确兼容约定）。
+- `~/wheel_torques`：四轮扭矩，`Float64MultiArray`，顺序为前左、前右、后左、后右；
+- `~/brake_pressures`：四轮归一化制动压力，顺序相同；
+- `/diagnostics`：限幅、分配残差、分配饱和与故障安全状态。
+
+## 看门狗与故障安全
+
+`CommandWatchdog` 是不依赖 ROS 2 的纯 Python 安全边界。输入超时、包含 NaN/Inf 或消息格式
+非法时，节点立即或在下一看门狗周期发布确定性的安全输出：
+
+- 四轮驱动扭矩全部为 0；
+- 转向请求归零；
+- 四轮制动压力设为 `safe_brake_pressure`；
+- `/diagnostics` 发布 ERROR，并说明超时或非法输入原因。
+
+制动参数受到双重约束：`max_brake_pressure` 必须位于 `(0, 1]`，且
+`safe_brake_pressure <= max_brake_pressure`。`allocator_residual_warn_threshold` 用于判定
+扭矩分配残差或饱和，超过阈值时诊断等级为 WARN。
+
+## 状态消息约定
+
+`Ros2CommandBridge.state_to_messages()` 使用标准 `nav_msgs/msg/Odometry` 字段表达纵向速度、
+侧向速度和横摆角速度。轮速不会写入 covariance：
+
+- 四轮轮速使用单独的 `Float64MultiArray`；
+- 质心侧偏角使用单独的 `Float64`；
+- Odometry covariance 保留给真实的估计协方差。
+
+## 参数
+
+默认参数位于 `config/controller.yaml`：
+
+| 参数 | 默认值 | 说明 |
+| --- | ---: | --- |
+| `max_torque` | 2500.0 | 单轮最大绝对扭矩 N·m |
+| `max_brake_pressure` | 1.0 | 归一化最大制动压力 |
+| `safe_brake_pressure` | 0.7 | 故障安全制动压力 |
+| `command_timeout_s` | 0.25 | 命令超时阈值 s |
+| `watchdog_period_s` | 0.05 | 安全检查周期 s |
+| `allocator_residual_warn_threshold` | 1.0 | 分配残差告警阈值 |
+
+启动文件会从安装后的包共享目录加载这份 YAML，而不是在 Python 中重复硬编码参数。
 
 ## 构建与运行
 
-先安装核心项目，再把 ROS 包放入 ROS 2 工作区：
-
 ```bash
-pip install -e .
+python -m pip install -e .
 cd ~/ros2_ws/src
 ln -s /path/to/electric-chassis-control-lab/ros2/electric_chassis_control_ros .
 cd ~/ros2_ws
@@ -37,5 +70,13 @@ source install/setup.bash
 ros2 launch electric_chassis_control_ros controller.launch.py
 ```
 
-没有 ROS 2 时，`python -m pytest -q` 仍会运行 bridge 的安全边界测试；导入
-`Ros2CommandBridge` 不需要 `rclpy`。
+可用下面的命令发送一组完整输入：
+
+```bash
+ros2 topic pub --once /electric_chassis_controller/force_request geometry_msgs/msg/Wrench \
+  "{force: {x: 1200.0}, torque: {z: 300.0}}"
+ros2 topic pub --once /electric_chassis_controller/steering_angle std_msgs/msg/Float64 "{data: 0.05}"
+ros2 topic pub --once /electric_chassis_controller/brake_request std_msgs/msg/Float64 "{data: 0.0}"
+```
+
+没有 ROS 2 时，`python -m pytest -q` 仍会测试消息转换、物理限幅、分配告警和看门狗逻辑。

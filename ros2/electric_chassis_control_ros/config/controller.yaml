@@ -2,3 +2,7 @@ electric_chassis_controller:
   ros__parameters:
     max_torque: 2500.0
     max_brake_pressure: 1.0
+    safe_brake_pressure: 0.7
+    command_timeout_s: 0.25
+    watchdog_period_s: 0.05
+    allocator_residual_warn_threshold: 1.0

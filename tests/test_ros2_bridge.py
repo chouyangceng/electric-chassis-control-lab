@@ -1,42 +1,54 @@
 """Contract tests for the optional ROS 2 bridge.
 
-The tests intentionally exercise the bridge without requiring a ROS 2 install;
-the package provides tiny message fallbacks for CI and algorithm development.
+These tests run without ROS 2 so the safety boundary remains testable in CI.
 """
+
+from pathlib import Path
 
 import numpy as np
 import pytest
 
 from electric_chassis_control.models.state import ChassisCommand, ChassisState
-from ros2.electric_chassis_control_ros.electric_chassis_control_ros.bridge import (
-    ROS2_AVAILABLE,
-    Ros2CommandBridge,
-)
+from ros2.electric_chassis_control_ros.electric_chassis_control_ros import bridge as bridge_module
+
+ROS2_AVAILABLE = bridge_module.ROS2_AVAILABLE
+Ros2CommandBridge = bridge_module.Ros2CommandBridge
 
 
-def test_bridge_clips_torque_and_brake_before_publishing() -> None:
+def _command(*, steering: float = 0.1, torque: float = 20.0, brake: float = 0.2) -> ChassisCommand:
+    return ChassisCommand(
+        steering=steering,
+        wheel_torques=np.full(4, torque),
+        brake_pressures=np.full(4, brake),
+        diagnostics={},
+    )
+
+
+def test_bridge_clips_actuators_and_keeps_output_messages_semantic() -> None:
     bridge = Ros2CommandBridge(max_torque=100.0, max_brake_pressure=0.8)
     command = ChassisCommand(
         steering=0.12,
         wheel_torques=np.array([250.0, -180.0, 20.0, -1.0]),
         brake_pressures=np.array([1.0, 0.2, 0.9, -0.5]),
-        diagnostics={"allocator_residual": 0.1},
+        diagnostics={"allocator_residual": 0.0},
     )
 
     messages = bridge.command_to_messages(command)
 
     assert np.allclose(messages.torque.data, [100.0, -100.0, 20.0, -1.0])
     assert np.allclose(messages.brake.data, [0.8, 0.2, 0.8, 0.0])
-    assert messages.twist.linear.x == pytest.approx(0.12)
-    assert messages.diagnostics.status[0].level >= 0
+    assert not hasattr(messages, "twist")
+    assert messages.diagnostics.status[0].level == 1
 
 
-def test_bridge_builds_safe_command_from_standard_twist() -> None:
+def test_bridge_builds_command_from_wrench_and_scalar_inputs() -> None:
     bridge = Ros2CommandBridge(max_torque=120.0)
-    request = bridge.make_twist(steering=0.05, longitudinal_force=900.0, yaw_moment=500.0, brake=0.3)
+    wrench = bridge.make_wrench(longitudinal_force=900.0, yaw_moment=500.0)
 
-    command = bridge.command_from_twist(request)
+    command = bridge.command_from_messages(wrench, steering=0.05, brake=0.3)
 
+    assert wrench.force.x == pytest.approx(900.0)
+    assert wrench.torque.z == pytest.approx(500.0)
     assert command.steering == pytest.approx(0.05)
     assert command.wheel_torques.shape == (4,)
     assert np.max(np.abs(command.wheel_torques)) <= 120.0 + 1e-9
@@ -45,41 +57,56 @@ def test_bridge_builds_safe_command_from_standard_twist() -> None:
 
 def test_bridge_rejects_non_finite_ros_inputs() -> None:
     bridge = Ros2CommandBridge()
-    request = bridge.make_twist(steering=float("nan"), longitudinal_force=0.0, yaw_moment=0.0, brake=0.0)
+    wrench = bridge.make_wrench(longitudinal_force=float("nan"), yaw_moment=0.0)
 
     with pytest.raises(ValueError, match="finite"):
-        bridge.command_from_twist(request)
+        bridge.command_from_messages(wrench, steering=0.0, brake=0.0)
 
 
-def test_bridge_rejects_non_finite_steering_on_output() -> None:
-    bridge = Ros2CommandBridge()
-    command = ChassisCommand(
-        steering=float("nan"),
-        wheel_torques=np.zeros(4),
-        brake_pressures=np.zeros(4),
-        diagnostics={},
-    )
-
-    with pytest.raises(ValueError, match="finite"):
-        bridge.command_to_messages(command)
+@pytest.mark.parametrize("maximum", [1.01, 2.0, float("inf")])
+def test_bridge_rejects_brake_limit_above_physical_range(maximum: float) -> None:
+    with pytest.raises(ValueError, match=r"\(0, 1\]"):
+        Ros2CommandBridge(max_brake_pressure=maximum)
 
 
-def test_bridge_warns_when_only_brake_pressure_is_clipped() -> None:
-    bridge = Ros2CommandBridge(max_brake_pressure=0.8)
-    command = ChassisCommand(
-        steering=0.0,
-        wheel_torques=np.zeros(4),
-        brake_pressures=np.full(4, 1.0),
-        diagnostics={},
-    )
+def test_bridge_warns_on_allocator_residual_or_saturation() -> None:
+    bridge = Ros2CommandBridge(max_torque=50.0, residual_warn_threshold=1.0)
+    wrench = bridge.make_wrench(longitudinal_force=100_000.0, yaw_moment=20_000.0)
+    command = bridge.command_from_messages(wrench, steering=0.0, brake=0.0)
 
     messages = bridge.command_to_messages(command)
 
-    assert messages.diagnostics.status[0].level == 1
-    assert "brake" in messages.diagnostics.status[0].message
+    status = messages.diagnostics.status[0]
+    assert status.level == 1
+    assert "allocator" in status.message
+    assert any(value.key == "allocator_saturated" and value.value == "true" for value in status.values)
 
 
-def test_state_round_trip_uses_standard_odometry_message() -> None:
+def test_watchdog_returns_deterministic_failsafe_for_stale_or_rejected_command() -> None:
+    watchdog = bridge_module.CommandWatchdog(timeout_s=0.2, safe_brake_pressure=0.7)
+    watchdog.accept(_command(), timestamp=10.0)
+
+    active = watchdog.evaluate(timestamp=10.1)
+    assert not active.is_failsafe
+    assert np.allclose(active.command.wheel_torques, 20.0)
+
+    stale = watchdog.evaluate(timestamp=10.21)
+    assert stale.is_failsafe
+    assert stale.reason == "command timeout"
+    assert np.allclose(stale.command.wheel_torques, 0.0)
+    assert np.allclose(stale.command.brake_pressures, 0.7)
+    assert stale.command.steering == 0.0
+
+    watchdog.accept(_command(), timestamp=11.0)
+    watchdog.reject("malformed command")
+    rejected = watchdog.evaluate(timestamp=11.0)
+    assert rejected.is_failsafe
+    assert rejected.reason == "malformed command"
+    assert np.allclose(rejected.command.wheel_torques, 0.0)
+    assert np.allclose(rejected.command.brake_pressures, 0.7)
+
+
+def test_state_messages_keep_odometry_covariance_and_wheel_speeds_separate() -> None:
     bridge = Ros2CommandBridge()
     state = ChassisState(
         vx=12.0,
@@ -89,10 +116,13 @@ def test_state_round_trip_uses_standard_odometry_message() -> None:
         wheel_speeds=np.array([37.0, 37.1, 36.8, 36.9]),
     )
 
-    odometry = bridge.state_to_odometry(state, frame_id="base_link")
-    restored = bridge.odometry_to_state(odometry)
+    messages = bridge.state_to_messages(state, frame_id="base_link")
+    restored = bridge.messages_to_state(messages.odometry, messages.wheel_speeds, messages.sideslip)
 
-    assert odometry.header.frame_id == "base_link"
+    assert messages.odometry.header.frame_id == "base_link"
+    assert np.allclose(messages.odometry.twist.covariance, 0.0)
+    assert np.allclose(messages.wheel_speeds.data, state.wheel_speeds)
+    assert messages.sideslip.data == pytest.approx(state.sideslip)
     assert restored.vx == pytest.approx(state.vx)
     assert restored.vy == pytest.approx(state.vy)
     assert restored.yaw_rate == pytest.approx(state.yaw_rate)
@@ -100,6 +130,18 @@ def test_state_round_trip_uses_standard_odometry_message() -> None:
     assert np.allclose(restored.wheel_speeds, state.wheel_speeds)
 
 
+def test_launch_loads_yaml_and_manifest_declares_launch_runtime_dependencies() -> None:
+    root = Path(__file__).parents[1]
+    launch_source = (root / "ros2/electric_chassis_control_ros/launch/controller.launch.py").read_text(
+        encoding="utf-8"
+    )
+    manifest = (root / "ros2/electric_chassis_control_ros/package.xml").read_text(encoding="utf-8")
+
+    assert "controller.yaml" in launch_source
+    assert "get_package_share_directory" in launch_source
+    assert "<exec_depend>launch</exec_depend>" in manifest
+    assert "<exec_depend>launch_ros</exec_depend>" in manifest
+
+
 def test_ros_dependency_is_optional() -> None:
-    # Importing the bridge is always valid on a plain Python developer machine.
     assert isinstance(ROS2_AVAILABLE, bool)
