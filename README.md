@@ -31,6 +31,15 @@
 
 CARLA/ROS 2 适配器可用于验证高层转向、油门和制动接口；四轮独立扭矩控制在自研 7 自由度模型中验证，因为标准 CARLA 车辆控制接口不等于真实四轮电机控制器。项目没有实车实验，所有数字均为仿真结果。
 
+### ROS 2 可选接口
+
+仓库现在包含一个不侵入核心依赖的 ROS 2 Python 包：
+`ros2/electric_chassis_control_ros`。它将 `geometry_msgs/msg/Twist` 转换为四轮
+扭矩/制动命令，并通过 `std_msgs/msg/Float64MultiArray` 和
+`diagnostic_msgs/msg/DiagnosticArray` 发布结果。桥接层在发布前再次执行扭矩和制动限幅，
+可在没有 `rclpy` 的普通 Python 环境中运行测试。完整消息约定、参数和 `colcon` 构建步骤见
+[docs/ros2接口.md](docs/ros2接口.md)。
+
 ## License
 
 Apache-2.0

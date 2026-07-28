@@ -1,0 +1,4 @@
+electric_chassis_controller:
+  ros__parameters:
+    max_torque: 2500.0
+    max_brake_pressure: 1.0

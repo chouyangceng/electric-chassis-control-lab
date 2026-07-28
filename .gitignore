@@ -7,3 +7,6 @@ artifacts/
 data/
 .mypy_cache/
 .ruff_cache/
+ros2/build/
+ros2/install/
+ros2/log/
