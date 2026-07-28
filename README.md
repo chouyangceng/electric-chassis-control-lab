@@ -1,0 +1,36 @@
+# Electric Chassis Control Lab
+
+面向车辆工程本科生的四轮独立驱动车辆动力学、横摆稳定控制和扭矩分配实验平台。项目重点是 7 自由度车辆模型、联合滑移轮胎约束、DYC/LQR/NMPC 基线和可解释的四轮扭矩分配。
+
+## 30 秒运行
+
+    python -m pip install -e .
+    python examples/quickstart.py
+
+## 完整实验
+
+    python experiments/run_experiment.py --scenario double_lane_change --controller dyc
+    python experiments/run_experiment.py --scenario split_mu --controller nmpc
+    python -m pytest -q
+    python -m ruff check .
+
+结果包括 `metrics.json`、`trace.csv` 和控制曲线。实验支持 `double_lane_change`、`split_mu`、`low_friction` 和 `motor_degradation`。
+
+## 研究问题
+
+- 轮胎纵横向联合滑移为什么要受摩擦圆约束？
+- 直接横摆力矩、LQR 和 NMPC 在低附着工况下有什么差异？
+- 四轮独立扭矩如何同时满足纵向力、横摆力矩和执行器边界？
+- 执行器受限或单电机降级时如何保持可控？
+
+## 与轨迹跟踪项目的区别
+
+本项目不以路径跟踪为主要问题，而以底盘稳定性、横摆力矩、扭矩分配、制动和降级为重点。
+
+## CARLA/ROS 2 边界
+
+CARLA/ROS 2 适配器可用于验证高层转向、油门和制动接口；四轮独立扭矩控制在自研 7 自由度模型中验证，因为标准 CARLA 车辆控制接口不等于真实四轮电机控制器。项目没有实车实验，所有数字均为仿真结果。
+
+## License
+
+Apache-2.0
