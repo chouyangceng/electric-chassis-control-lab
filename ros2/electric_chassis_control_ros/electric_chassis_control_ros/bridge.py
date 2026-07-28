@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import cast
 
 import numpy as np
 
@@ -58,8 +59,14 @@ except ImportError:  # pragma: no cover - fallback classes are covered by projec
         status: list[DiagnosticStatus] = field(default_factory=list)
 
     @dataclass
+    class _Time:
+        sec: int = 0
+        nanosec: int = 0
+
+    @dataclass
     class _Header:
         frame_id: str = ""
+        stamp: _Time = field(default_factory=_Time)
 
     @dataclass
     class _Twist:
@@ -84,6 +91,7 @@ class BridgeMessages:
 
     torque: Float64MultiArray
     brake: Float64MultiArray
+    steering: Float64
     diagnostics: DiagnosticArray
 
 
@@ -103,6 +111,53 @@ class WatchdogDecision:
     command: ChassisCommand
     is_failsafe: bool
     reason: str
+
+
+@dataclass(frozen=True)
+class CommandInputs:
+    """One coherent high-level command assembled from the three ROS topics."""
+
+    wrench: Wrench
+    steering: float
+    brake: float
+
+
+class CommandInputCache:
+    """Collect timestamped topic inputs and release only a fresh complete set."""
+
+    _FIELDS = frozenset({"wrench", "steering", "brake"})
+
+    def __init__(self) -> None:
+        self._values: dict[str, object] = {}
+        self._timestamps: dict[str, float] = {}
+
+    def update(self, field_name: str, value: object, *, timestamp: float) -> None:
+        if field_name not in self._FIELDS:
+            raise ValueError(f"unknown command input: {field_name}")
+        if not np.isfinite(timestamp):
+            raise ValueError("timestamp must be finite")
+        self._values[field_name] = value
+        self._timestamps[field_name] = float(timestamp)
+
+    def clear(self) -> None:
+        """Discard all fields so a rejected command cannot reuse cached values."""
+        self._values.clear()
+        self._timestamps.clear()
+
+    def complete(self, *, now: float, timeout_s: float) -> CommandInputs | None:
+        if not np.isfinite(now) or not np.isfinite(timeout_s) or timeout_s <= 0:
+            raise ValueError("now and timeout_s must be finite, with timeout_s positive")
+        if self._values.keys() != self._FIELDS or self._timestamps.keys() != self._FIELDS:
+            return None
+        oldest_age = float(now) - min(self._timestamps.values())
+        newest_age = float(now) - max(self._timestamps.values())
+        if oldest_age > timeout_s or newest_age < 0.0:
+            return None
+        return CommandInputs(
+            wrench=cast(Wrench, self._values["wrench"]),
+            steering=float(self._values["steering"]),
+            brake=float(self._values["brake"]),
+        )
 
 
 class CommandWatchdog:
@@ -132,6 +187,8 @@ class CommandWatchdog:
 
     def reject(self, reason: str) -> None:
         self._rejection_reason = reason.strip() or "malformed command"
+        self._command = None
+        self._accepted_at = None
 
     def evaluate(self, *, timestamp: float) -> WatchdogDecision:
         if not np.isfinite(timestamp):
@@ -229,6 +286,8 @@ class Ros2CommandBridge:
         torque_message.data = torques.tolist()
         brake_message = Float64MultiArray()
         brake_message.data = brakes.tolist()
+        steering_message = Float64()
+        steering_message.data = float(command.steering)
 
         residual = float(command.diagnostics.get("allocator_residual", 0.0))
         allocator_saturated = bool(command.diagnostics.get("allocator_saturated", 0.0))
@@ -258,15 +317,41 @@ class Ros2CommandBridge:
         ]
         diagnostics = DiagnosticArray()
         diagnostics.status = [status]
-        return BridgeMessages(torque=torque_message, brake=brake_message, diagnostics=diagnostics)
+        return BridgeMessages(
+            torque=torque_message,
+            brake=brake_message,
+            steering=steering_message,
+            diagnostics=diagnostics,
+        )
 
-    def state_to_messages(self, state: ChassisState, *, frame_id: str = "base_link") -> StateMessages:
+    def state_to_messages(
+        self,
+        state: ChassisState,
+        *,
+        parent_frame_id: str = "odom",
+        child_frame_id: str = "base_link",
+        timestamp_s: float | None = None,
+    ) -> StateMessages:
         """Encode state without overloading odometry covariance or velocity fields."""
-        if not isinstance(frame_id, str) or not frame_id:
-            raise ValueError("frame_id must be a non-empty string")
+        if not isinstance(parent_frame_id, str) or not parent_frame_id:
+            raise ValueError("parent_frame_id must be a non-empty string")
+        if not isinstance(child_frame_id, str) or not child_frame_id:
+            raise ValueError("child_frame_id must be a non-empty string")
+        if parent_frame_id == child_frame_id:
+            raise ValueError("parent_frame_id and child_frame_id must be distinct")
         odometry = Odometry()
-        odometry.header.frame_id = frame_id
-        odometry.child_frame_id = frame_id
+        odometry.header.frame_id = parent_frame_id
+        odometry.child_frame_id = child_frame_id
+        if timestamp_s is not None:
+            if not np.isfinite(timestamp_s) or timestamp_s < 0.0:
+                raise ValueError("timestamp_s must be finite and non-negative")
+            seconds = int(timestamp_s)
+            nanoseconds = round((float(timestamp_s) - seconds) * 1_000_000_000)
+            if nanoseconds == 1_000_000_000:
+                seconds += 1
+                nanoseconds = 0
+            odometry.header.stamp.sec = seconds
+            odometry.header.stamp.nanosec = nanoseconds
         odometry.twist.twist.linear.x = float(state.vx)
         odometry.twist.twist.linear.y = float(state.vy)
         odometry.twist.twist.angular.z = float(state.yaw_rate)

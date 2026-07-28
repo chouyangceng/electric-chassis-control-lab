@@ -37,6 +37,7 @@ def test_bridge_clips_actuators_and_keeps_output_messages_semantic() -> None:
 
     assert np.allclose(messages.torque.data, [100.0, -100.0, 20.0, -1.0])
     assert np.allclose(messages.brake.data, [0.8, 0.2, 0.8, 0.0])
+    assert messages.steering.data == pytest.approx(0.12)
     assert not hasattr(messages, "twist")
     assert messages.diagnostics.status[0].level == 1
 
@@ -104,6 +105,25 @@ def test_watchdog_returns_deterministic_failsafe_for_stale_or_rejected_command()
     assert rejected.reason == "malformed command"
     assert np.allclose(rejected.command.wheel_torques, 0.0)
     assert np.allclose(rejected.command.brake_pressures, 0.7)
+    assert rejected.command.steering == 0.0
+    rejected_messages = Ros2CommandBridge().command_to_messages(
+        rejected.command, failsafe_reason=rejected.reason
+    )
+    assert rejected_messages.steering.data == 0.0
+
+
+def test_command_input_cache_requires_fresh_complete_set_after_clear() -> None:
+    cache = bridge_module.CommandInputCache()
+    wrench = bridge_module.Wrench()
+    cache.update("wrench", wrench, timestamp=1.0)
+    cache.update("steering", 0.1, timestamp=1.0)
+    cache.update("brake", 0.2, timestamp=1.0)
+    assert cache.complete(now=1.1, timeout_s=0.2) is not None
+
+    cache.clear()
+    assert cache.complete(now=1.1, timeout_s=0.2) is None
+    cache.update("steering", 0.4, timestamp=1.2)
+    assert cache.complete(now=1.2, timeout_s=0.2) is None
 
 
 def test_state_messages_keep_odometry_covariance_and_wheel_speeds_separate() -> None:
@@ -116,10 +136,13 @@ def test_state_messages_keep_odometry_covariance_and_wheel_speeds_separate() -> 
         wheel_speeds=np.array([37.0, 37.1, 36.8, 36.9]),
     )
 
-    messages = bridge.state_to_messages(state, frame_id="base_link")
+    messages = bridge.state_to_messages(state, timestamp_s=12.345)
     restored = bridge.messages_to_state(messages.odometry, messages.wheel_speeds, messages.sideslip)
 
-    assert messages.odometry.header.frame_id == "base_link"
+    assert messages.odometry.header.frame_id == "odom"
+    assert messages.odometry.child_frame_id == "base_link"
+    assert messages.odometry.header.stamp.sec == 12
+    assert messages.odometry.header.stamp.nanosec == 345_000_000
     assert np.allclose(messages.odometry.twist.covariance, 0.0)
     assert np.allclose(messages.wheel_speeds.data, state.wheel_speeds)
     assert messages.sideslip.data == pytest.approx(state.sideslip)
@@ -136,11 +159,14 @@ def test_launch_loads_yaml_and_manifest_declares_launch_runtime_dependencies() -
         encoding="utf-8"
     )
     manifest = (root / "ros2/electric_chassis_control_ros/package.xml").read_text(encoding="utf-8")
+    setup_cfg = (root / "ros2/electric_chassis_control_ros/setup.cfg").read_text(encoding="utf-8")
 
     assert "controller.yaml" in launch_source
     assert "get_package_share_directory" in launch_source
     assert "<exec_depend>launch</exec_depend>" in manifest
     assert "<exec_depend>launch_ros</exec_depend>" in manifest
+    assert "script_dir=$base/lib/electric_chassis_control_ros" in setup_cfg
+    assert "install_scripts=$base/lib/electric_chassis_control_ros" in setup_cfg
 
 
 def test_ros_dependency_is_optional() -> None:

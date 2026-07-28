@@ -5,7 +5,13 @@ from __future__ import annotations
 import math
 import time
 
-from .bridge import ROS2_AVAILABLE, CommandWatchdog, Ros2CommandBridge, WatchdogDecision
+from .bridge import (
+    ROS2_AVAILABLE,
+    CommandInputCache,
+    CommandWatchdog,
+    Ros2CommandBridge,
+    WatchdogDecision,
+)
 
 try:  # Messages may be importable where rclpy is absent.
     if not ROS2_AVAILABLE:
@@ -49,13 +55,11 @@ if ROS_NODE_AVAILABLE:  # pragma: no cover - requires a sourced ROS 2 environmen
                 timeout_s=timeout_s,
                 safe_brake_pressure=safe_brake,
             )
-            self._wrench: Wrench | None = None
-            self._steering: float | None = None
-            self._brake: float | None = None
-            self._input_times: dict[str, float] = {}
+            self._inputs = CommandInputCache()
 
             self.torque_pub = self.create_publisher(Float64MultiArray, "~/wheel_torques", 10)
             self.brake_pub = self.create_publisher(Float64MultiArray, "~/brake_pressures", 10)
+            self.steering_pub = self.create_publisher(Float64, "~/steering_command", 10)
             self.diag_pub = self.create_publisher(DiagnosticArray, "/diagnostics", 10)
             self.create_subscription(Wrench, "~/force_request", self._on_wrench, 10)
             self.create_subscription(Float64, "~/steering_angle", self._on_steering, 10)
@@ -66,37 +70,33 @@ if ROS_NODE_AVAILABLE:  # pragma: no cover - requires a sourced ROS 2 environmen
             if not math.isfinite(request.force.x) or not math.isfinite(request.torque.z):
                 self._reject_and_publish("malformed force request")
                 return
-            self._wrench = request
-            self._input_times["wrench"] = time.monotonic()
+            self._inputs.update("wrench", request, timestamp=time.monotonic())
             self._try_accept_and_publish()
 
         def _on_steering(self, request: Float64) -> None:
             if not math.isfinite(request.data):
                 self._reject_and_publish("malformed steering request")
                 return
-            self._steering = float(request.data)
-            self._input_times["steering"] = time.monotonic()
+            self._inputs.update("steering", float(request.data), timestamp=time.monotonic())
             self._try_accept_and_publish()
 
         def _on_brake(self, request: Float64) -> None:
             if not math.isfinite(request.data):
                 self._reject_and_publish("malformed brake request")
                 return
-            self._brake = float(request.data)
-            self._input_times["brake"] = time.monotonic()
+            self._inputs.update("brake", float(request.data), timestamp=time.monotonic())
             self._try_accept_and_publish()
 
         def _try_accept_and_publish(self) -> None:
-            if self._wrench is None or self._steering is None or self._brake is None:
-                return
             now = time.monotonic()
-            if len(self._input_times) != 3 or now - min(self._input_times.values()) > self.watchdog.timeout_s:
+            inputs = self._inputs.complete(now=now, timeout_s=self.watchdog.timeout_s)
+            if inputs is None:
                 return
             try:
                 command = self.bridge.command_from_messages(
-                    self._wrench,
-                    steering=self._steering,
-                    brake=self._brake,
+                    inputs.wrench,
+                    steering=inputs.steering,
+                    brake=inputs.brake,
                 )
             except ValueError as exc:
                 self._reject_and_publish(f"malformed command: {exc}")
@@ -107,6 +107,7 @@ if ROS_NODE_AVAILABLE:  # pragma: no cover - requires a sourced ROS 2 environmen
         def _reject_and_publish(self, reason: str) -> None:
             self.get_logger().error(reason)
             self.watchdog.reject(reason)
+            self._inputs.clear()
             self._publish(self.watchdog.evaluate(timestamp=time.monotonic()))
 
         def _on_watchdog(self) -> None:
@@ -119,6 +120,7 @@ if ROS_NODE_AVAILABLE:  # pragma: no cover - requires a sourced ROS 2 environmen
             )
             self.torque_pub.publish(messages.torque)
             self.brake_pub.publish(messages.brake)
+            self.steering_pub.publish(messages.steering)
             self.diag_pub.publish(messages.diagnostics)
 
 else:

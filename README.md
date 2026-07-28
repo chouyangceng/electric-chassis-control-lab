@@ -35,7 +35,7 @@ python -m ruff check .
 
 - `geometry_msgs/msg/Wrench` 表达纵向合力和横摆力矩；
 - 两个 `std_msgs/msg/Float64` 分别表达转角和制动请求；
-- `Float64MultiArray` 发布四轮扭矩和四轮制动压力；
+- `Float64MultiArray` 发布四轮扭矩和四轮制动压力，独立 `Float64` 发布转向指令；
 - 输入非法或超时后，看门狗发布零驱动扭矩和可配置的安全制动；
 - 分配残差、饱和、限幅和故障安全状态发布到 `/diagnostics`；
 - 四轮轮速使用独立消息，不占用 `Odometry` 的 covariance 字段。

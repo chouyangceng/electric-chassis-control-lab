@@ -18,6 +18,7 @@ ROS 2 适配包位于 `ros2/electric_chassis_control_ros`。核心动力学、�
 
 - `~/wheel_torques`：四轮扭矩，`Float64MultiArray`，顺序为前左、前右、后左、后右；
 - `~/brake_pressures`：四轮归一化制动压力，顺序相同；
+- `~/steering_command`：实际下发的前轮转角，`Float64`，单位 rad；
 - `/diagnostics`：限幅、分配残差、分配饱和与故障安全状态。
 
 ## 看门狗与故障安全
@@ -29,6 +30,9 @@ ROS 2 适配包位于 `ros2/electric_chassis_control_ros`。核心动力学、�
 - 转向请求归零；
 - 四轮制动压力设为 `safe_brake_pressure`；
 - `/diagnostics` 发布 ERROR，并说明超时或非法输入原因。
+
+非法输入会清空三类输入缓存。故障安全锁存只有在 Wrench、转角、制动三类输入全部重新到达
+且时间差满足阈值后才会解除，单个新消息不会与拒绝前的缓存拼接成命令。
 
 制动参数受到双重约束：`max_brake_pressure` 必须位于 `(0, 1]`，且
 `safe_brake_pressure <= max_brake_pressure`。`allocator_residual_warn_threshold` 用于判定
@@ -42,6 +46,9 @@ ROS 2 适配包位于 `ros2/electric_chassis_control_ros`。核心动力学、�
 - 四轮轮速使用单独的 `Float64MultiArray`；
 - 质心侧偏角使用单独的 `Float64`；
 - Odometry covariance 保留给真实的估计协方差。
+
+Odometry 默认使用 `header.frame_id=odom` 和 `child_frame_id=base_link`，避免把父子坐标系写成
+同一个值；调用桥接函数时可显式传入非负秒时间戳，安全填充 `stamp.sec/nanosec`。
 
 ## 参数
 
