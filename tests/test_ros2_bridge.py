@@ -7,7 +7,7 @@ the package provides tiny message fallbacks for CI and algorithm development.
 import numpy as np
 import pytest
 
-from electric_chassis_control.models.state import ChassisCommand
+from electric_chassis_control.models.state import ChassisCommand, ChassisState
 from ros2.electric_chassis_control_ros.electric_chassis_control_ros.bridge import (
     ROS2_AVAILABLE,
     Ros2CommandBridge,
@@ -49,6 +49,55 @@ def test_bridge_rejects_non_finite_ros_inputs() -> None:
 
     with pytest.raises(ValueError, match="finite"):
         bridge.command_from_twist(request)
+
+
+def test_bridge_rejects_non_finite_steering_on_output() -> None:
+    bridge = Ros2CommandBridge()
+    command = ChassisCommand(
+        steering=float("nan"),
+        wheel_torques=np.zeros(4),
+        brake_pressures=np.zeros(4),
+        diagnostics={},
+    )
+
+    with pytest.raises(ValueError, match="finite"):
+        bridge.command_to_messages(command)
+
+
+def test_bridge_warns_when_only_brake_pressure_is_clipped() -> None:
+    bridge = Ros2CommandBridge(max_brake_pressure=0.8)
+    command = ChassisCommand(
+        steering=0.0,
+        wheel_torques=np.zeros(4),
+        brake_pressures=np.full(4, 1.0),
+        diagnostics={},
+    )
+
+    messages = bridge.command_to_messages(command)
+
+    assert messages.diagnostics.status[0].level == 1
+    assert "brake" in messages.diagnostics.status[0].message
+
+
+def test_state_round_trip_uses_standard_odometry_message() -> None:
+    bridge = Ros2CommandBridge()
+    state = ChassisState(
+        vx=12.0,
+        vy=0.4,
+        yaw_rate=0.08,
+        sideslip=0.02,
+        wheel_speeds=np.array([37.0, 37.1, 36.8, 36.9]),
+    )
+
+    odometry = bridge.state_to_odometry(state, frame_id="base_link")
+    restored = bridge.odometry_to_state(odometry)
+
+    assert odometry.header.frame_id == "base_link"
+    assert restored.vx == pytest.approx(state.vx)
+    assert restored.vy == pytest.approx(state.vy)
+    assert restored.yaw_rate == pytest.approx(state.yaw_rate)
+    assert restored.sideslip == pytest.approx(state.sideslip)
+    assert np.allclose(restored.wheel_speeds, state.wheel_speeds)
 
 
 def test_ros_dependency_is_optional() -> None:

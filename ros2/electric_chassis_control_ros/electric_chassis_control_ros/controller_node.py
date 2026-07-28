@@ -4,13 +4,21 @@ from __future__ import annotations
 
 from .bridge import ROS2_AVAILABLE, Ros2CommandBridge
 
-if ROS2_AVAILABLE:  # pragma: no cover - requires a sourced ROS 2 environment
+try:  # Messages may be importable in a Python shell where rclpy is absent.
+    if not ROS2_AVAILABLE:
+        raise ImportError
     import rclpy
     from diagnostic_msgs.msg import DiagnosticArray
     from geometry_msgs.msg import Twist
     from rclpy.node import Node
     from std_msgs.msg import Float64MultiArray
+except ImportError:  # pragma: no cover - exercised on non-ROS machines
+    ROS_NODE_AVAILABLE = False
+else:
+    ROS_NODE_AVAILABLE = True
 
+
+if ROS_NODE_AVAILABLE:  # pragma: no cover - requires a sourced ROS 2 environment
     class ControllerNode(Node):
         """Subscribe to a high-level Twist and publish safe wheel commands."""
 
@@ -46,7 +54,7 @@ else:
 
 def main(args: list[str] | None = None) -> int:
     """Run the node when ROS 2 is available."""
-    if not ROS2_AVAILABLE:
+    if not ROS_NODE_AVAILABLE:
         raise RuntimeError("ROS 2 is not installed; install rclpy and source your ROS 2 workspace")
     rclpy.init(args=args)
     node = ControllerNode()

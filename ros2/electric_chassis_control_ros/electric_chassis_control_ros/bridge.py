@@ -7,11 +7,12 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from electric_chassis_control.allocation.constrained import ConstrainedTorqueAllocator
-from electric_chassis_control.models.state import ChassisCommand
+from electric_chassis_control.models.state import ChassisCommand, ChassisState
 
 try:  # pragma: no cover - exercised only in a sourced ROS 2 environment
     from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
     from geometry_msgs.msg import Twist
+    from nav_msgs.msg import Odometry
     from std_msgs.msg import Float64MultiArray
 
     ROS2_AVAILABLE = True
@@ -51,6 +52,21 @@ except ImportError:  # pragma: no cover - fallback is covered by project CI
     @dataclass
     class DiagnosticArray:
         status: list[DiagnosticStatus] = field(default_factory=list)
+
+    @dataclass
+    class _Header:
+        frame_id: str = ""
+
+    @dataclass
+    class _TwistWithCovariance:
+        twist: Twist = field(default_factory=Twist)
+        covariance: list[float] = field(default_factory=lambda: [0.0] * 36)
+
+    @dataclass
+    class Odometry:
+        header: _Header = field(default_factory=_Header)
+        child_frame_id: str = ""
+        twist: _TwistWithCovariance = field(default_factory=_TwistWithCovariance)
 
 
 @dataclass(frozen=True)
@@ -117,10 +133,14 @@ class Ros2CommandBridge:
         """Convert a command to standard ROS messages after safety clipping."""
         torques = np.asarray(command.wheel_torques, dtype=float)
         brakes = np.asarray(command.brake_pressures, dtype=float)
+        if not np.isfinite(command.steering):
+            raise ValueError("steering command must be finite")
         if torques.shape != (4,) or brakes.shape != (4,) or not np.isfinite(torques).all():
             raise ValueError("wheel command arrays must contain four finite values")
         if not np.isfinite(brakes).all():
             raise ValueError("wheel command arrays must contain finite values")
+        torque_clipped = bool(np.any(np.abs(torques) > self.max_torque))
+        brake_clipped = bool(np.any((brakes < 0.0) | (brakes > self.max_brake_pressure)))
         torques = np.clip(torques, -self.max_torque, self.max_torque)
         brakes = np.clip(brakes, 0.0, self.max_brake_pressure)
 
@@ -136,9 +156,54 @@ class Ros2CommandBridge:
         residual = float(command.diagnostics.get("allocator_residual", 0.0))
         status = DiagnosticStatus()
         status.name = "electric_chassis_control/actuator_limits"
-        status.level = DiagnosticStatus.WARN if np.any(np.abs(torques) >= self.max_torque) else DiagnosticStatus.OK
-        status.message = "torque or brake command clipped" if status.level else "command within limits"
+        status.level = DiagnosticStatus.WARN if torque_clipped or brake_clipped else DiagnosticStatus.OK
+        clipped = []
+        if torque_clipped:
+            clipped.append("torque")
+        if brake_clipped:
+            clipped.append("brake")
+        status.message = f"{' and '.join(clipped)} command clipped" if clipped else "command within limits"
         status.values = [KeyValue(key="allocator_residual", value=f"{residual:.6g}")]
         diagnostics = DiagnosticArray()
         diagnostics.status = [status]
         return BridgeMessages(twist=twist, torque=torque_msg, brake=brake_msg, diagnostics=diagnostics)
+
+    def state_to_odometry(self, state: ChassisState, *, frame_id: str = "base_link") -> Odometry:
+        """Encode a chassis state in standard ``nav_msgs/msg/Odometry``.
+
+        Linear velocity and yaw rate use their conventional fields.  Sideslip
+        is carried in ``twist.twist.angular.x`` and four wheel speeds occupy the
+        first four entries of the twist covariance array, preserving the full
+        research state without introducing a custom message type.
+        """
+        if not isinstance(frame_id, str) or not frame_id:
+            raise ValueError("frame_id must be a non-empty string")
+        odometry = Odometry()
+        odometry.header.frame_id = frame_id
+        twist = odometry.twist.twist
+        twist.linear.x = float(state.vx)
+        twist.linear.y = float(state.vy)
+        twist.angular.x = float(state.sideslip)
+        twist.angular.z = float(state.yaw_rate)
+        covariance = np.zeros(36, dtype=float)
+        covariance[:4] = np.asarray(state.wheel_speeds, dtype=float)
+        odometry.twist.covariance = covariance.tolist()
+        return odometry
+
+    @staticmethod
+    def odometry_to_state(odometry: Odometry) -> ChassisState:
+        """Decode the documented ``Odometry`` representation into ``ChassisState``."""
+        twist = odometry.twist.twist
+        covariance = np.asarray(odometry.twist.covariance, dtype=float)
+        if covariance.shape != (36,) or not np.all(np.isfinite(covariance[:4])):
+            raise ValueError("Odometry twist covariance must contain four finite wheel speeds")
+        values = np.asarray([twist.linear.x, twist.linear.y, twist.angular.z, twist.angular.x], dtype=float)
+        if not np.all(np.isfinite(values)):
+            raise ValueError("Odometry twist fields must be finite")
+        return ChassisState(
+            vx=float(twist.linear.x),
+            vy=float(twist.linear.y),
+            yaw_rate=float(twist.angular.z),
+            sideslip=float(twist.angular.x),
+            wheel_speeds=covariance[:4].copy(),
+        )

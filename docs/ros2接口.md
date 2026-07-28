@@ -19,6 +19,10 @@
 数组顺序为前左、前右、后左、后右；同时发布 `/diagnostics`
 （`diagnostic_msgs/msg/DiagnosticArray`）。所有输出在发布前都会再次执行扭矩和制动限幅。
 
+`Ros2CommandBridge.state_to_odometry()` 和 `odometry_to_state()` 提供
+`nav_msgs/msg/Odometry` 状态接口：纵向/侧向速度、横摆角速度使用标准 twist 字段，侧偏角放在
+`angular.x`，四个轮速写入 twist 协方差数组的前四项（这是无自定义消息时的明确兼容约定）。
+
 ## 构建与运行
 
 先安装核心项目，再把 ROS 包放入 ROS 2 工作区：
